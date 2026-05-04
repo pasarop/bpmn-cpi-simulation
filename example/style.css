@@ -80,6 +80,19 @@ body:not(.presentation-mode) .bts-notifications {
   flex: 1;
   position: relative;
   justify-content: stretch;
+  overflow: hidden;
+}
+
+/* Heatmap overlay */
+#heatmap-overlay {
+  position: absolute !important;
+  top: 0;
+  left: 0;
+  width: 100% !important;
+  height: 100% !important;
+  pointer-events: none;
+  z-index: 5;
+  overflow: hidden;
 }
 
 .properties-panel {

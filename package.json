@@ -122,6 +122,7 @@
     "bpmn-js-color-picker": "^0.7.2",
     "diagram-js-grid": "^1.1.0",
     "diagram-js-minimap": "^5.2.0",
+    "heatmap.js": "^2.0.5",
     "inherits-browser": "^0.1.0",
     "min-dash": "^5.0.0",
     "min-dom": "^4.2.1",

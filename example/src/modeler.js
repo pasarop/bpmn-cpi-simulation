@@ -25,6 +25,7 @@ import ColorPickerModule from 'bpmn-js-color-picker';
 import minimapModule from 'diagram-js-minimap';
 import BpmnLintModule from 'bpmn-js-bpmnlint';
 import bpmnlintConfig from '../../.bpmnlintrc';
+import h337 from 'heatmap.js';
 
 import exampleXML from '../resources/example.bpmn';
 
@@ -988,6 +989,10 @@ async function playStates() {
           const bo = el.businessObject;
           const hasMessageDef = bo && bo.eventDefinitions && bo.eventDefinitions.some(d => d.$type === 'bpmn:MessageEventDefinition');
           if (hasMessageDef) return false;
+          // Skip StartEvents inside SubProcesses — they fire automatically
+          // when the SubProcess is entered, not via direct trigger
+          const parentBo = bo && bo.$parent;
+          if (parentBo && (parentBo.$type === 'bpmn:SubProcess' || parentBo.$type === 'bpmn:Transaction')) return false;
           return true;
         });
 
@@ -1051,6 +1056,11 @@ async function playStates() {
     // ALWAYS re-enable the button
     isStepping = false;
     playStatesBtn.disabled = false;
+
+    // Auto-refresh heatmap if visible
+    if (heatmapVisible && heatmapInstance) {
+      updateHeatmapData();
+    }
   }
 }
 
@@ -1091,5 +1101,192 @@ if (remoteDiagram) {
   openDiagram(initialDiagram);
 }
 
+// ─── Heatmap Overlay ───────────────────────────────────────────────────────
+let heatmapInstance = null;
+let heatmapContainer = null;
+let heatmapVisible = false;
+
+// Track token frequency per element (how many times a token has entered each element)
+const elementTokenFrequency = new Map();
+
+// Tap into existing simulation trace to count entries
+modeler.get('eventBus').on('tokenSimulation.simulator.trace', event => {
+  const { action, element } = event;
+  if (!element) return;
+
+  if (action === 'enter') {
+    const elementId = element.id || element;
+    elementTokenFrequency.set(elementId, (elementTokenFrequency.get(elementId) || 0) + 1);
+  }
+});
+
+// Reset heatmap frequency data when simulation resets
+modeler.get('eventBus').on('tokenSimulation.resetSimulation', () => {
+  elementTokenFrequency.clear();
+  if (heatmapInstance) {
+    heatmapInstance.setData({ max: 1, data: [] });
+  }
+});
+
+function createHeatmapOverlay() {
+  const canvasEl = document.querySelector('#canvas');
+  if (!canvasEl) return;
+
+  // Pause MutationObserver to prevent scroll during DOM manipulation
+  controlsObserver.disconnect();
+
+  // Remove old overlay if it exists
+  if (heatmapContainer && heatmapContainer.parentNode) {
+    heatmapContainer.parentNode.removeChild(heatmapContainer);
+  }
+
+  heatmapContainer = document.createElement('div');
+  heatmapContainer.id = 'heatmap-overlay';
+  heatmapContainer.style.cssText = `
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 5;
+  `;
+  canvasEl.appendChild(heatmapContainer);
+
+  heatmapInstance = h337.create({
+    container: heatmapContainer,
+    radius: 70,
+    maxOpacity: 0.6,
+    minOpacity: 0.08,
+    blur: 0.8,
+    gradient: {
+      0.1: '#2196F3',
+      0.3: '#4CAF50',
+      0.5: '#FFEB3B',
+      0.7: '#FF9800',
+      1.0: '#F44336'
+    }
+  });
+
+  // Re-enable observer after DOM is settled
+  requestAnimationFrame(() => {
+    controlsObserver.observe(document.body, { childList: true, subtree: true });
+  });
+}
+
+function getHeatmapFrequencyData() {
+  // Use real-time frequency tracking if available
+  if (elementTokenFrequency.size > 0) {
+    return elementTokenFrequency;
+  }
+
+  // Fallback: derive frequency from elementTokenHistory (populated by state sequence playback)
+  const fallback = new Map();
+  elementTokenHistory.forEach((scopeMap, elementId) => {
+    fallback.set(elementId, scopeMap.size || 1);
+  });
+  return fallback;
+}
+
+function updateHeatmapData() {
+  if (!heatmapInstance || !heatmapContainer) return;
+
+  const canvas = modeler.get('canvas');
+  const registry = modeler.get('elementRegistry');
+  const containerRect = heatmapContainer.getBoundingClientRect();
+  const data = [];
+  let max = 1;
+
+  const freqData = getHeatmapFrequencyData();
+
+  if (freqData.size === 0) {
+    console.log('[Heatmap] No frequency data yet — run the simulation first.');
+    heatmapInstance.setData({ max: 1, data: [] });
+    return;
+  }
+
+  // Find max frequency for normalization
+  freqData.forEach(count => {
+    if (count > max) max = count;
+  });
+
+  freqData.forEach((count, elementId) => {
+    const element = registry.get(elementId);
+    if (!element) return;
+
+    // Use getBoundingClientRect on SVG graphics for pixel-perfect coordinates
+    const gfx = canvas.getGraphics(element);
+    if (!gfx) return;
+
+    const elemRect = gfx.getBoundingClientRect();
+    const screenX = elemRect.left + elemRect.width / 2 - containerRect.left;
+    const screenY = elemRect.top + elemRect.height / 2 - containerRect.top;
+
+    // Only add points within the visible container
+    if (screenX >= 0 && screenY >= 0 &&
+        screenX <= containerRect.width &&
+        screenY <= containerRect.height) {
+      data.push({
+        x: Math.round(screenX),
+        y: Math.round(screenY),
+        value: count
+      });
+    }
+  });
+
+  console.log('[Heatmap] Rendering', data.length, 'data points, max:', max);
+  heatmapInstance.setData({ max, data });
+}
+
+function toggleHeatmap(event) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  heatmapVisible = !heatmapVisible;
+
+  const btn = document.getElementById('toggle-heatmap');
+
+  if (heatmapVisible) {
+    createHeatmapOverlay();
+    updateHeatmapData();
+    btn.textContent = 'Hide Heatmap';
+    btn.style.background = '#e3f2fd';
+    btn.style.borderColor = '#2196F3';
+
+    console.log('[Heatmap] Enabled — tracked elements:', elementTokenFrequency.size,
+      ', history elements:', elementTokenHistory.size);
+  } else {
+    // Pause observer to prevent scroll on removal too
+    controlsObserver.disconnect();
+
+    if (heatmapContainer && heatmapContainer.parentNode) {
+      heatmapContainer.parentNode.removeChild(heatmapContainer);
+    }
+    heatmapInstance = null;
+    heatmapContainer = null;
+    btn.textContent = 'Toggle Heatmap';
+    btn.style.background = '';
+    btn.style.borderColor = '';
+
+    requestAnimationFrame(() => {
+      controlsObserver.observe(document.body, { childList: true, subtree: true });
+    });
+
+    console.log('[Heatmap] Disabled');
+  }
+}
+
+// Refresh heatmap when canvas is panned/zoomed
+modeler.get('eventBus').on('canvas.viewbox.changed', () => {
+  if (heatmapVisible && heatmapInstance) {
+    updateHeatmapData();
+  }
+});
+
+document.getElementById('toggle-heatmap').addEventListener('click', toggleHeatmap);
+
 // expose for theming
 window.bpmnjs = modeler;
+
